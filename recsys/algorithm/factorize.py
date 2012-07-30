@@ -530,7 +530,7 @@ class SVDNeighbourhood(SVD):
 
 
 # SVDNeighbourhoodKoren
-class __SVDNeighbourhoodKoren(SVDNeighbourhood):
+class SVDNeighbourhoodKoren(SVDNeighbourhood):
     """
     Inherits from SVDNeighbourhood class. 
 
@@ -557,23 +557,6 @@ class __SVDNeighbourhoodKoren(SVDNeighbourhood):
         # Mean of each row / col
         self._mean_row = dict()
         self._mean_col = dict()
-        
-        self._ASVector = Vector()
-        self._SocialMatrix = Matrix()
-        
-        
-    def loadSocialData(self, filename):
-        if not os.path.isfile(filename):
-            sys.stderr.write("Error filename!\n")
-            sys.exit(1)
-            
-        fobj = open(filename, 'r')
-        for line in fobj.readlines():
-            sp = line.strip().split('\t')
-            user_s = sp[0]
-            user_m = sp[1]
-            self._ASVector.addToVec(user_s, 1.0)
-            self._SocialMatrix.addToMat(user_s, user_m, 1.0)
 
     def set_mu(self, mu):
         """
@@ -705,76 +688,109 @@ class __SVDNeighbourhoodKoren(SVDNeighbourhood):
             predicted_value = min(predicted_value, MAX_VALUE)
         return float(predicted_value)
     
-    def predictSocial(self, i, j, Sk=None, MIN_VALUE=None, MAX_VALUE=None):
+
+# SVDNeighbourhoodSocial
+class SVDNeighbourhoodSocial(SVD):
+    """
+    Classic Neighbourhood plus Singular Value Decomposition. Inherits from SVD class
+
+    Predicts the value of :math:`M_{i,j}`, using simple avg. (weighted) of
+    all the ratings by the most similar users (or items). This similarity, *sim(i,j)* is derived from the SVD
+
+    :param filename: Path to a Zip file, containing an already computed SVD (U, Sigma, and V) for a matrix *M*
+    :type filename: string
+    :param Sk: number of similar elements (items or users) to be used in *predict(i,j)*
+    :type Sk: int
+    """
+    def __init__(self, filename=None, Sk=10):
+        # Call parent constructor
+        super(SVDNeighbourhoodSocial, self).__init__(filename)
+
+        # Number of similar elements
+        self._Sk = Sk #Length of Sk(i;u)
+        
+        self._ASVector = Vector()
+        self._SocialMatrix = Matrix()
+
+    def similar_neighbours(self, i, j, Sk=10):
+        similars = self.similar(i, Sk*10) #Get 10 times Sk
+        # Get only those items that user j has already rated
+        current = 0
+        _Sk = Sk
+        for similar, weight in similars[1:]:
+            if self.get_matrix().value(similars[current][0], j) == 0.0:
+                similars.pop(current)
+                current -= 1
+                _Sk += 1
+            current += 1
+            _Sk -= 1
+            if _Sk == 0: 
+                break # We have enough elements to use
+        return similars[:Sk]
+    
+    
+    def loadSocialData(self, filename):
+        if not os.path.isfile(filename):
+            sys.stderr.write("Error filename!\n")
+            sys.exit(1)
+            
+        fobj = open(filename, 'r')
+        for line in fobj.readlines():
+            sp = line.strip().split('\t')
+            user_s = sp[0]
+            user_m = sp[1]
+            self._ASVector.addToVec(user_s, 1.0)
+            self._SocialMatrix.addToMat(user_s, user_m, 1.0)
+
+    def predict(self, i, j, Sk=10, weighted=True, MIN_VALUE=None, MAX_VALUE=None):
         """
-        Predicts the value of *M(i,j)*
+        Predicts the value of :math:`M_{i,j}`, using simple avg. (weighted) of
+        all the ratings by the most similar users (or items)
 
-        It is based on 'Factorization Meets the Neighborhood: a Multifaceted
-        Collaborative Filtering Model' (Yehuda Koren). 
-        Equation 3 (section 2.2):
+        if *weighted*:
+            :math:`\hat{r}_{ui} = \\frac{\sum_{j \in S^{k}(i;u)} sim(i, j) r_{uj}}{\sum_{j \in S^{k}(i;u)} sim(i, j)}`
 
-        :math:`\hat{r}_{ui} = b_{ui} + \\frac{\sum_{j \in S^k(i;u)} s_{ij} (r_{uj} - b_{uj})}{\sum_{j \in S^k(i;u)} s_{ij}}`, where
-        :math:`b_{ui} = \mu + b_u + b_i`
+        else:
+            :math:`\hat{r}_{ui} = mean(\sum_{j \in S^{k}(i;u)} r_{uj})`
 
-        http://public.research.att.com/~volinsky/netflix/kdd08koren.pdf
-
-        :param i: row in M, M(i)
+        :param i: row in M, :math:`M_{i \cdot}`
         :type i: user or item id
-        :param j: col in M, M(j)
-        :type j: user or item id
+        :param j: col in M, :math:`M_{\cdot j}`
+        :type j: item or user id
         :param Sk: number of k elements to be used in :math:`S^k(i; u)`
         :type Sk: int
+        :param weighted: compute avg. weighted of all the ratings?
+        :type weighted: Boolean
         :param MIN_VALUE: min. value in M (e.g. in ratings[1..5] => 1)
         :type MIN_VALUE: float
         :param MAX_VALUE: max. value in M (e.g. in ratings[1..5] => 5)
         :type MAX_VALUE: float
-
         """
-        # http://public.research.att.com/~volinsky/netflix/kdd08koren.pdf
-        # bui = µ + bu + bi
-        #   The parameters bu and bi indicate the observed deviations of user
-        #   u and item i, respectively, from the average
-        # 
-        # S^k(i; u): 
-        #   Using the similarity measure, we identify the k items rated
-        #   by u, which are most similar to i.
-        #
-        # sij: similarity between i and j
-        #
-        # r^ui = bui + Sumj∈S^k(i;u) sij (ruj − buj) / Sumj∈S^k(i;u) sij
         if not Sk:
             Sk = self._Sk
-
         similars = self.similar_neighbours(i, j, Sk)
         #Now, similars == S^k(i; u)
 
-        #bu = self._mean_col.get(j, self.set_mean(j, is_row=False)) - self._mean_cols
-        #bi = self._mean_row.get(i, self.set_mean(i, is_row=True)) - self._mean_rows
-        bu = self._mean_col[j] - self._mean_cols
-        bi = self._mean_row[i] - self._mean_rows
-        bui = bu + bi
-        #if self._Mu: #TODO uncomment?
-        #   bui += self._Mu
- 
         sim_ratings = []
         sum_similarity = 0.0
-        for similar, sij in similars[1:]:
+        for similar, weight in similars:
             sim_rating = self.get_matrix().value(similar, j)
-            if sim_rating is None:
+            if sim_rating is None: #== 0.0:
                 continue
-            ruj = sim_rating
-            sum_similarity += (sij + social_intensity(similar, j))
-            bj = self._mean_row[similar]- self._mean_rows
-            buj = bu + bj
-            sim_ratings.append((sij + social_intensity(similar, j)) * (ruj - buj))
+            fix_weight = weight + self.social_intensity(similar, j)
+            sum_similarity += weight
+            if weighted:
+                sim_ratings.append(weight * sim_rating)
+            else:
+                sim_ratings.append(sim_rating)
 
         if not sum_similarity or not sim_ratings:
             return nan
 
-        Sumj_Sk = sum(sim_ratings)/sum_similarity
-        rui = bui + Sumj_Sk
-        predicted_value = rui
-        
+        if weighted:
+            predicted_value = sum(sim_ratings)/sum_similarity
+        else:
+            predicted_value = mean(sim_ratings)
         if MIN_VALUE:
             predicted_value = max(predicted_value, MIN_VALUE)
         if MAX_VALUE:
@@ -793,4 +809,3 @@ class __SVDNeighbourhoodKoren(SVDNeighbourhood):
         except:
             res += 0.0
         return res
-
