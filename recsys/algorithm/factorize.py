@@ -778,9 +778,9 @@ class SVDNeighbourhoodSocial(SVD):
             if sim_rating is None: #== 0.0:
                 continue
             fix_weight = weight + self.social_intensity(similar, j)
-            sum_similarity += weight
+            sum_similarity += fix_weight
             if weighted:
-                sim_ratings.append(weight * sim_rating)
+                sim_ratings.append(fix_weight * sim_rating)
             else:
                 sim_ratings.append(sim_rating)
 
@@ -797,7 +797,7 @@ class SVDNeighbourhoodSocial(SVD):
             predicted_value = min(predicted_value, MAX_VALUE)
         return float(predicted_value)
     
-    def social_intensity(self, user_s, user_m):
+    def social_intensity(self, user_m, user_s):
         res = 0.0
         try:
             res += self._SocialMatrix.getItem(user_s,user_m) / self._ASVector[user_s]
@@ -809,3 +809,198 @@ class SVDNeighbourhoodSocial(SVD):
         except:
             res += 0.0
         return res
+
+
+
+
+# SVDNeighbourhoodKoren
+class SVDNeighbourhoodKorenSocial(SVDNeighbourhood):
+    """
+    Inherits from SVDNeighbourhood class. 
+
+    Neighbourhood model, using Singular Value Decomposition.
+    Based on 'Factorization Meets the Neighborhood: a Multifaceted
+    Collaborative Filtering Model' (Yehuda Koren)
+    http://public.research.att.com/~volinsky/netflix/kdd08koren.pdf
+
+    :param filename: Path to a Zip file, containing an already computed SVD (U, Sigma, and V) for a matrix *M*
+    :type filename: string
+    :param Sk: number of similar elements (items or users) to be used in *predict(i,j)*
+    :type Sk: int
+    """
+    def __init__(self, filename=None, Sk=10):
+        # Call parent constructor
+        super(SVDNeighbourhoodKoren, self).__init__(filename, Sk)
+
+        # µ denotes the overall average rating
+        self._Mu = None
+        # Mean of all rows
+        self._mean_rows = None
+        # Mean of all cols
+        self._mean_cols = None
+        # Mean of each row / col
+        self._mean_row = dict()
+        self._mean_col = dict()
+        
+        self._ASVector = Vector()
+        self._SocialMatrix = Matrix()
+
+    def set_mu(self, mu):
+        """
+        Sets the :math:`\mu`. The overall average rating
+
+        :param mu: overall average rating
+        :type mu: float
+        """
+        self._Mu = mu
+
+    def _set_mean_all(self, avg=None, is_row=True):
+        m = self._mean_row.values()
+        if not is_row:
+            m = self._mean_col.values()
+        return mean(m)
+
+    def set_mean_rows(self, avg=None):
+        """
+        Sets the average value of all rows
+
+        :param avg: the average value (if None, it computes *average(i)*)
+        :type avg: float
+        """
+        self._mean_rows = self._set_mean_all(avg, is_row=True)
+
+    def set_mean_cols(self, avg=None):
+        """
+        Sets the average value of all cols
+
+        :param avg: the average value (if None, it computes *average(i)*)
+        :type avg: float
+        """
+        self._mean_cols = self._set_mean_all(avg, is_row=False)
+
+    def set_mean(self, i, avg=None, is_row=True):
+        """
+        Sets the average value of a row (or column).
+
+        :param i: a row (or column)
+        :type i: user or item id
+        :param avg: the average value (if None, it computes *average(i)*)
+        :type avg: float
+        :param is_row: is param *i* a row (or a col)?
+        :type is_row: Boolean
+        """
+        d = self._mean_row
+        if not is_row:
+            d = self._mean_col
+        if avg is None: #Compute average
+            m = self._matrix.get().row_named
+            if not is_row:
+                m = self._matrix.get().col_named
+            avg = mean(m(i))
+        d[i] = avg
+
+    def loadSocialData(self, filename):
+        if not os.path.isfile(filename):
+            sys.stderr.write("Error filename!\n")
+            sys.exit(1)
+            
+        fobj = open(filename, 'r')
+        for line in fobj.readlines():
+            sp = line.strip().split('\t')
+            user_s = sp[0]
+            user_m = sp[1]
+            self._ASVector.addToVec(user_s, 1.0)
+            self._SocialMatrix.addToMat(user_s, user_m, 1.0)
+            
+            
+    def predict(self, i, j, Sk=None, MIN_VALUE=None, MAX_VALUE=None):
+        """
+        Predicts the value of *M(i,j)*
+
+        It is based on 'Factorization Meets the Neighborhood: a Multifaceted
+        Collaborative Filtering Model' (Yehuda Koren). 
+        Equation 3 (section 2.2):
+
+        :math:`\hat{r}_{ui} = b_{ui} + \\frac{\sum_{j \in S^k(i;u)} s_{ij} (r_{uj} - b_{uj})}{\sum_{j \in S^k(i;u)} s_{ij}}`, where
+        :math:`b_{ui} = \mu + b_u + b_i`
+
+        http://public.research.att.com/~volinsky/netflix/kdd08koren.pdf
+
+        :param i: row in M, M(i)
+        :type i: user or item id
+        :param j: col in M, M(j)
+        :type j: user or item id
+        :param Sk: number of k elements to be used in :math:`S^k(i; u)`
+        :type Sk: int
+        :param MIN_VALUE: min. value in M (e.g. in ratings[1..5] => 1)
+        :type MIN_VALUE: float
+        :param MAX_VALUE: max. value in M (e.g. in ratings[1..5] => 5)
+        :type MAX_VALUE: float
+
+        """
+        # http://public.research.att.com/~volinsky/netflix/kdd08koren.pdf
+        # bui = µ + bu + bi
+        #   The parameters bu and bi indicate the observed deviations of user
+        #   u and item i, respectively, from the average
+        # 
+        # S^k(i; u): 
+        #   Using the similarity measure, we identify the k items rated
+        #   by u, which are most similar to i.
+        #
+        # sij: similarity between i and j
+        #
+        # r^ui = bui + Sumj∈S^k(i;u) sij (ruj − buj) / Sumj∈S^k(i;u) sij
+        if not Sk:
+            Sk = self._Sk
+
+        similars = self.similar_neighbours(i, j, Sk)
+        #Now, similars == S^k(i; u)
+
+        #bu = self._mean_col.get(j, self.set_mean(j, is_row=False)) - self._mean_cols
+        #bi = self._mean_row.get(i, self.set_mean(i, is_row=True)) - self._mean_rows
+        bu = self._mean_col[j] - self._mean_cols
+        bi = self._mean_row[i] - self._mean_rows
+        bui = bu + bi
+        #if self._Mu: #TODO uncomment?
+        #   bui += self._Mu
+ 
+        sim_ratings = []
+        sum_similarity = 0.0
+        for similar, sij in similars[1:]:
+            sim_rating = self.get_matrix().value(similar, j)
+            if sim_rating is None:
+                continue
+            ruj = sim_rating
+            fix_sij = sij + self.social_intensity(similar, j)
+            sum_similarity += fix_sij
+            bj = self._mean_row[similar]- self._mean_rows
+            buj = bu + bj
+            sim_ratings.append(fix_sij * (ruj - buj))
+
+        if not sum_similarity or not sim_ratings:
+            return nan
+
+        Sumj_Sk = sum(sim_ratings)/sum_similarity
+        rui = bui + Sumj_Sk
+        predicted_value = rui
+        
+        if MIN_VALUE:
+            predicted_value = max(predicted_value, MIN_VALUE)
+        if MAX_VALUE:
+            predicted_value = min(predicted_value, MAX_VALUE)
+        return float(predicted_value)
+    
+    def social_intensity(self, user_m, user_s):
+        res = 0.0
+        try:
+            res += self._SocialMatrix.getItem(user_s,user_m) / self._ASVector[user_s]
+        except:
+            res += 0.0 
+
+        try:
+            res += 0.5 * self._SocialMatrix.getItem(user_m, user_s) / self._ASVector[user_m]
+        except:
+            res += 0.0
+        return res
+
+    
